@@ -371,3 +371,8 @@ To run this example client:
    ```
 
 This client will connect to your Nmap MCP server, list available tools, call `getInfo` for server information, and then call `nmapScan` to perform a scan on `scanme.nmap.org`.
+
+
+
+
+docker run -p 5001:5001 --cap-add=NET_ADMIN --cap-add=NET_RAW --name nmap-mcp-container nmap-mcp-server

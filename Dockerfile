@@ -1,4 +1,25 @@
-FROM node:18-alpine
+FROM ubuntu:22.04
+
+# Set non-interactive mode for apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies including nmap
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    gnupg2 \
+    software-properties-common \
+    ca-certificates \
+    apt-transport-https \
+    nmap \
+    procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 18.x from NodeSource
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    apt-get update && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create app directory
 WORKDIR /usr/src/app
@@ -9,25 +30,24 @@ WORKDIR /usr/src/app
 COPY package*.json ./
 
 RUN npm install
-# Install nmap core plus NSE libraries and scripts
-RUN apk add --no-cache nmap nmap-nselibs nmap-scripts
 
-# Check for nse_main.lua in the standard location for nmap data files
-# This command will fail the build if the file is not found,
-# which should be visible in Smithery's deployment logs.
-RUN if [ ! -f /usr/share/nmap/nse_main.lua ]; then \
-    echo "ERROR: /usr/share/nmap/nse_main.lua NOT FOUND!"; \
-    echo "Listing contents of /usr/share/nmap/ and /usr/share/nmap/scripts/ (if they exist):"; \
-    ls -R /usr/share/nmap || echo "/usr/share/nmap does not exist or is empty"; \
-    exit 1; \
-    fi
-ENV NMAPDIR /usr/share/nmap
-# If you are building your code for production
-# RUN npm ci --omit=dev
+# Verify nmap installation and NSE scripts
+RUN nmap --version && \
+    ls -la /usr/share/nmap/ && \
+    ls -la /usr/share/nmap/scripts/ | head -20
+
+# Set environment variable for nmap directory
+ENV NMAPDIR=/usr/share/nmap
 
 # Bundle app source
 COPY . .
 
+# Expose the port the app runs on
 EXPOSE 5001
 
-CMD [ "node", "server.js" ] 
+# Add a health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD pgrep -f "node.*server.js" || exit 1
+
+# Run the application
+CMD [ "node", "server.js" ]
