@@ -57,16 +57,8 @@ function validateFlags(flags) {
     return false;
   }
   
-  // Whitelist of safe nmap flags
-  const allowedFlags = [
-    '-T0', '-T1', '-T2', '-T3', '-T4', '-T5',
-    '-sS', '-sT', '-sU', '-sA', '-sW', '-sM', '-sV', '-sC',
-    '-F', '-r', '--top-ports', '-p', '-A', '-O',
-    '--version-intensity', '--osscan-limit', '--osscan-guess',
-    '-oX', '-oN', '-oG', '-v', '-d', '--reason', '--open', '--packet-trace',
-    '--script'
-  ];
-  
+  // Allow all flags - no whitelist restriction
+  // Basic validation to ensure flags are properly formatted
   const flagsArray = flags.split(/\s+/);
   
   for (let i = 0; i < flagsArray.length; i++) {
@@ -75,47 +67,9 @@ function validateFlags(flags) {
     // Skip empty flags
     if (!flag) continue;
     
-    // Check if it's a port specification (after -p flag)
-    if (i > 0 && flagsArray[i-1] === '-p') {
-      // Validate port specification: numbers, commas, dashes
-      if (flag.match(/^[\d,\-]+$/)) {
-        // Further validate individual port specs
-        const portSpecs = flag.split(',');
-        const validPortSpec = portSpecs.every(spec => {
-          // Single port: 80
-          if (spec.match(/^\d+$/)) return parseInt(spec) <= 65535;
-          // Port range: 80-90
-          if (spec.match(/^\d+-\d+$/)) {
-            const [start, end] = spec.split('-').map(Number);
-            return start <= end && start > 0 && end <= 65535;
-          }
-          return false;
-        });
-        if (validPortSpec) continue;
-      }
-      return false;
-    }
-    
-    // Check if it's a standalone number (port range after --top-ports)
-    if (i > 0 && flagsArray[i-1] === '--top-ports') {
-      if (flag.match(/^\d+$/) && parseInt(flag) <= 65535) continue;
-      return false;
-    }
-    
-    // Check if it's a script name (after --script flag)
-    if (i > 0 && flagsArray[i-1] === '--script') {
-      // Allow 'vuln' script and potentially others in the future by relaxing this check
-      // For now, let's be specific or allow any alphanumeric script name
-      if (flag.match(/^[a-zA-Z0-9_\-]+$/)) { 
-        continue;
-      }
-      return false;
-    }
-    
-    // Check if it matches allowed flags
-    const isAllowedFlag = allowedFlags.some(allowed => flag.startsWith(allowed));
-    if (!isAllowedFlag) {
-      console.log(`Flag validation failed for: ${flag}`);
+    // Basic validation: flags should start with - or -- or be values for preceding flags
+    if (!flag.startsWith('-') && i === 0) {
+      // First flag must start with - or --
       return false;
     }
   }
@@ -136,13 +90,14 @@ function createMcpServer({ sessionId, config }) {
     "nmapScan",
     {
       target: z.string().describe("Domain name, IP address, or CIDR notation to scan (e.g., example.com, 192.168.1.1, 10.0.0.0/24)"),
-      flags: z.string().optional().default("-T4 -p 1-1000").describe("Nmap scanning flags. Common options: -T4 (timing), -p 1-1000 (port range), -sS (SYN scan), -A (aggressive scan)")
+      flags: z.string().optional().default("-T4 -p 1-1000").describe("Nmap scanning flags. Common options: -T4 (timing), -p 1-1000 (port range), -sS (SYN scan), -A (aggressive scan)"),
+      outputFormat: z.enum(["xml", "normal", "grepable"]).optional().default("xml").describe("Output format: xml (structured), normal (human-readable), or grepable (grep-friendly)")
     },
-    async ({ target, flags = "-T4 -p 1-1000" }) => {
+    async ({ target, flags = "-T4 -p 1-1000", outputFormat = "xml" }) => {
       const logPrefix = `[${sessionId || 'N/A'}]`;
       
       // Debug: Log the received arguments
-      console.log(`${logPrefix} Received target: ${target}, flags: ${flags}`);
+      console.log(`${logPrefix} Received target: ${target}, flags: ${flags}, outputFormat: ${outputFormat}`);
       
       try {
         console.log(`${logPrefix} Starting Nmap scan for target: ${target}`);
@@ -156,8 +111,24 @@ function createMcpServer({ sessionId, config }) {
           throw new Error(`Invalid or potentially unsafe flags detected: ${flags}`);
         }
 
-        // Construct and execute nmap command
-        const nmapCommand = `${NMAP_PATH} --datadir /usr/share/nmap -oX - ${flags} ${target}`;
+        // Construct output format flag
+        let outputFlag;
+        switch (outputFormat) {
+          case "xml":
+            outputFlag = "-oX -";
+            break;
+          case "normal":
+            outputFlag = "-oN -";
+            break;
+          case "grepable":
+            outputFlag = "-oG -";
+            break;
+          default:
+            outputFlag = "-oX -";
+        }
+
+        // Construct and execute nmap command with specified output format
+        const nmapCommand = `${NMAP_PATH} --datadir /usr/share/nmap ${outputFlag} ${flags} ${target}`;
         console.log(`${logPrefix} Executing command: ${nmapCommand}`);
         
         const { stdout, stderr } = await execAsync(nmapCommand, {
@@ -169,35 +140,65 @@ function createMcpServer({ sessionId, config }) {
           console.warn(`${logPrefix} Nmap stderr: ${stderr}`);
         }
 
-        // Parse XML output
-        const parsedResult = await new Promise((resolve, reject) => {
-          xmlParser.parseString(stdout, (parseError, result) => {
-            if (parseError) {
-              reject(new Error(`Failed to parse Nmap XML output: ${parseError.message}`));
-            } else {
-              resolve(result);
+        // Handle output based on format
+        if (outputFormat === "xml") {
+          // Try to parse XML output, fallback to plain text if it fails
+          try {
+            const parsedResult = await new Promise((resolve, reject) => {
+              xmlParser.parseString(stdout, (parseError, result) => {
+                if (parseError) {
+                  reject(new Error(`Failed to parse Nmap XML output: ${parseError.message}`));
+                } else {
+                  resolve(result);
+                }
+              });
+            });
+
+            // Validate parsed result structure
+            if (!parsedResult || typeof parsedResult.nmaprun !== 'object') {
+              throw new Error("Nmap output parsing did not yield expected nmaprun structure");
             }
-          });
-        });
 
-        console.log(`${logPrefix} Nmap scan completed successfully for ${target}`);
+            // Format results for better readability
+            const summary = formatNmapResults(parsedResult);
+            
+            console.log(`${logPrefix} Nmap scan completed successfully for ${target}`);
 
-        // Validate parsed result structure
-        if (!parsedResult || typeof parsedResult.nmaprun !== 'object') {
-          throw new Error("Nmap output parsing did not yield expected nmaprun structure");
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Nmap Scan Results for ${target} (XML Format)\n\n${summary}\n\nFull XML Output:\n${JSON.stringify(parsedResult, null, 2)}`
+                }
+              ]
+            };
+
+          } catch (parseError) {
+            console.warn(`${logPrefix} XML parsing failed, returning raw XML output: ${parseError.message}`);
+            
+            // Return raw XML output if parsing fails
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Nmap Scan Results for ${target} (Raw XML)\n\n${stdout}`
+                }
+              ]
+            };
+          }
+        } else {
+          // For normal and grepable formats, return plain text
+          console.log(`${logPrefix} Nmap scan completed successfully for ${target}`);
+          
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Nmap Scan Results for ${target} (${outputFormat} format)\n\n${stdout}`
+              }
+            ]
+          };
         }
-
-        // Format results for better readability
-        const summary = formatNmapResults(parsedResult);
-        
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Nmap Scan Results for ${target}\n\n${summary}\n\nFull XML Output:\n${JSON.stringify(parsedResult, null, 2)}`
-            }
-          ]
-        };
 
       } catch (error) {
         console.error(`${logPrefix} Nmap scan failed: ${error.message}`);
@@ -227,9 +228,7 @@ function createMcpServer({ sessionId, config }) {
 - Service: Network scanning using Nmap
 - Version: 1.0.0
 - Available Tools: nmapScan, getInfo
-- Session ID: ${sessionId || 'N/A'}
-- Supported Targets: Domain names, IP addresses, CIDR notation
-- Security: Input validation and command sanitization enabled`
+- Session ID: ${sessionId || 'N/A'}`
           }
         ]
       };
@@ -271,7 +270,7 @@ function formatNmapResults(parsedResult) {
     summary += `\nScan completed: ${nmaprun.runstats?.finished?.timestr || 'Unknown'}`;
     return summary;
   } catch (error) {
-    return "Could not format scan results - see full XML output below";
+    return "Could not format scan results correctly. Please check the raw output.";
   }
 }
 

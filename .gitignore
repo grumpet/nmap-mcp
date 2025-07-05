@@ -1,3 +1,14 @@
 node_modules
 .env
-*.log 
+*.log
+.git
+.gitignore
+README.md
+BUILD.md
+curl_commands.md
+curl-examples.md
+rebuild.ps1
+rebuild-detached.ps1
+rebuild.sh
+nmap_mcp_client_example.js
+.vscode
